@@ -1,0 +1,4 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+# 仅测试需要（容器内可选执行 python -m unittest discover -s tests）：
+httpx==0.28.1
