@@ -356,5 +356,90 @@ class DifferentialTests(unittest.TestCase):
         self.assertGreater(feasible, 300)  # 确保有足够多的可行对拍样本
 
 
+class LargeInstanceTests(unittest.TestCase):
+    def _powers_of_two_instance(self):
+        # 20 个按时间端点相接的单词（全为说话人 A）；第 i 个候选时长=评分=2^i
+        words = []
+        t = 0
+        for i in range(20):
+            d = 1 << i
+            words.append(W(t, t + d, "词", "A"))
+            t += d
+        candidates = [C(i, i, 1 << i) for i in range(20)]
+        return words, candidates
+
+    def test_powers_of_two_budget_524287(self):
+        # 2^19=524288 单项即超预算；其余 0..18 全选恰好 524287 分 / 524287ms
+        words, candidates = self._powers_of_two_instance()
+        clips, total_score, total_duration = plan_trailer(
+            words, candidates, 524287, ["A"]
+        )
+        self.assertEqual(total_score, 524287)
+        self.assertEqual(total_duration, 524287)
+        self.assertEqual([c["candidate_index"] for c in clips], list(range(19)))
+
+    def test_powers_of_two_full_budget(self):
+        # 预算放宽到总和 2^20-1：20 个全选
+        words, candidates = self._powers_of_two_instance()
+        clips, total_score, total_duration = plan_trailer(
+            words, candidates, (1 << 20) - 1, ["A"]
+        )
+        self.assertEqual(total_score, (1 << 20) - 1)
+        self.assertEqual(total_duration, (1 << 20) - 1)
+        self.assertEqual([c["candidate_index"] for c in clips], list(range(20)))
+
+    def test_powers_of_two_reverse_input_order(self):
+        # 候选按时间倒序提交：reversed[i] 即原 fwd[19-i]（词 19-i、2^(19-i) 分）。
+        # 词 19 对应原序号 0，单项即超预算被排除；最优解按源时间升序返回，
+        # 即词 0..18 对应原序号 19..1。
+        words, candidates = self._powers_of_two_instance()
+        clips, total_score, total_duration = plan_trailer(
+            words, candidates[::-1], 524287, ["A"]
+        )
+        self.assertEqual((total_score, total_duration), (524287, 524287))
+        self.assertEqual([c["candidate_index"] for c in clips], list(range(19, 0, -1)))
+
+    def test_runs_within_512_mib_address_space(self):
+        # 在 RLIMIT_AS=512MiB 的子进程中复现病态请求：旧的“每状态双份
+        # Python 前沿”DP 在此配置下抛 MemoryError；紧凑前沿 DP 应正常
+        # 返回 524287/524287。
+        import os
+        import subprocess
+        import sys
+
+        if not sys.platform.startswith("linux"):
+            self.skipTest("RLIMIT_AS 地址空间限制仅在 Linux 上验证")
+        script = (
+            "import resource, sys\n"
+            "resource.setrlimit(resource.RLIMIT_AS, (512 << 20, 512 << 20))\n"
+            "sys.path.insert(0, %r)\n"
+            "from types import SimpleNamespace\n"
+            "from app.trailer_plan import plan_trailer\n"
+            "words, t = [], 0\n"
+            "for i in range(20):\n"
+            "    d = 1 << i\n"
+            "    words.append(SimpleNamespace("
+            "start_ms=t, end_ms=t + d, text='词', speaker='A'))\n"
+            "    t += d\n"
+            "cands = [SimpleNamespace(start_word=i, end_word=i, score=1 << i)"
+            " for i in range(20)]\n"
+            "clips, score, dur = plan_trailer(words, cands, 524287, ['A'])\n"
+            "assert score == 524287 and dur == 524287\n"
+            "assert [c['candidate_index'] for c in clips] == list(range(19))\n"
+            % os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"stdout={result.stdout!r}\nstderr={result.stderr!r}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
