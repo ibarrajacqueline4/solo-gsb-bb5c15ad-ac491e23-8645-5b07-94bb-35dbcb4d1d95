@@ -285,6 +285,76 @@ class CandidateValidationTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "overlapping_time_range")
 
 
+class MemoryRegressionTests(unittest.TestCase):
+    """20 个时间相接、时长/评分按 2 的幂增长的候选：前沿含 2^20 量级个
+    互不支配点，旧的 dict 前沿实现会超过 512 MiB 而 MemoryError。"""
+
+    def _power_of_two_case(self):
+        # 20 个端点相接的词（说话人均为 A），词 i 时长 2^i；候选与词一一
+        # 对应，评分同为 2^i。预算 2^19-1：第 19 项单独就超预算，满分方案
+        # 为选 0～18，总评分=总时长=2^19-1（子集和二进制唯一，不可超越）。
+        words = []
+        t = 0
+        for i in range(20):
+            dur = 1 << i
+            words.append(W(t, t + dur, "词", "A"))
+            t += dur
+        candidates = [C(i, i, 1 << i) for i in range(20)]
+        return words, candidates
+
+    def test_power_of_two_chain_optimum(self):
+        words, candidates = self._power_of_two_case()
+        clips, total_score, total_duration = plan_trailer(
+            words, candidates, 524287, ["A"]
+        )
+        self.assertEqual(total_score, 524287)
+        self.assertEqual(total_duration, 524287)
+        self.assertEqual([c["candidate_index"] for c in clips], list(range(19)))
+
+    def test_runs_within_512mib_address_space(self):
+        # 在 512 MiB 地址空间硬限的子进程中跑同一请求（Linux 专属护栏）
+        import platform
+        import sys
+
+        if platform.system() != "Linux":
+            self.skipTest("RLIMIT_AS 仅在 Linux 上可用")
+        import multiprocessing
+
+        ctx = multiprocessing.get_context("fork")
+        result = ctx.Queue()
+        words, candidates = self._power_of_two_case()
+
+        def worker(words, candidates, out):
+            import resource
+
+            limit = 512 * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+            try:
+                clips, total_score, total_duration = plan_trailer(
+                    words, candidates, 524287, ["A"]
+                )
+            except MemoryError:
+                out.put(("memory_error",))
+                return
+            out.put(
+                (
+                    "ok",
+                    [c["candidate_index"] for c in clips],
+                    total_score,
+                    total_duration,
+                )
+            )
+
+        proc = ctx.Process(target=worker, args=(words, candidates, result))
+        proc.start()
+        proc.join(timeout=60)
+        self.assertFalse(proc.is_alive(), "子进程超时")
+        self.assertEqual(proc.exitcode, 0)
+        answer = result.get_nowait()
+        self.assertNotEqual(answer[0], "memory_error", "在 512 MiB 限制下 MemoryError")
+        self.assertEqual(answer, ("ok", list(range(19)), 524287, 524287))
+
+
 class DifferentialTests(unittest.TestCase):
     def test_matches_brute_force(self):
         random.seed(20260925)
